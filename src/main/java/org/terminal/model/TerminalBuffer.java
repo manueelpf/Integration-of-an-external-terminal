@@ -214,7 +214,7 @@ public final class TerminalBuffer {
                 newLine();
             }
 
-            //writeGlyphOverwrite(cursorRow, cursorColumn, codePoint, currentAttributes);
+            writeGlyphOverwrite(cursorRow, cursorColumn, codePoint, currentAttributes);
             advanceAfterWrite(glyphWidth);
         }
     }
@@ -248,7 +248,7 @@ public final class TerminalBuffer {
                 newLine();
             }
 
-            //insertGlyph(cursorRow, cursorColumn, new Glyph(DisplayWidthUtils.stringOf(codePoint), glyphWidth, currentAttributes));
+            insertGlyph(cursorRow, cursorColumn, new Glyph(DisplayWidthUtils.stringOf(codePoint), glyphWidth, currentAttributes));
             advanceAfterWrite(glyphWidth);
         }
     }
@@ -297,6 +297,7 @@ public final class TerminalBuffer {
         lineFeed();
         normalizeCursor();
     }
+
     private void lineFeed() {
         if (cursorRow < height - 1) {
             cursorRow++;
@@ -438,6 +439,7 @@ public final class TerminalBuffer {
         lineFeed();
         pendingWrap = false;
     }
+
     /**
      * Clears the visible screen and resets the cursor.
      * Scrollback is preserved.
@@ -458,5 +460,255 @@ public final class TerminalBuffer {
     public void clearScreenAndScrollback() {
         scrollback.clear();
         clearScreen();
+    }
+
+    /**
+     * Resizes the visible screen and reflows the existing content to the new width.
+     * The bottom-most lines remain visible after resize.
+     *
+     * @param newWidth the new screen width
+     * @param newHeight the new screen height
+     */
+    public void resize(int newWidth, int newHeight) {
+        if (newWidth <= 0) {
+            throw new IllegalArgumentException("newWidth must be greater than zero");
+        }
+        if (newHeight <= 0) {
+            throw new IllegalArgumentException("newHeight must be greater than zero");
+        }
+
+        List<TerminalLine> oldAllLines = new ArrayList<>(scrollback.size() + screen.size());
+        oldAllLines.addAll(scrollback);
+        oldAllLines.addAll(screen);
+
+        List<TerminalLine> reflowed = new ArrayList<>();
+        for (TerminalLine oldLine : oldAllLines) {
+            List<Glyph> glyphs = extractMeaningfulGlyphs(oldLine);
+            if (glyphs.isEmpty()) {
+                reflowed.add(new TerminalLine(newWidth));
+                continue;
+            }
+
+            TerminalLine currentLine = new TerminalLine(newWidth);
+            int currentColumn = 0;
+
+            for (Glyph glyph : glyphs) {
+                if (glyph.width == 2 && currentColumn == newWidth - 1) {
+                    reflowed.add(currentLine);
+                    currentLine = new TerminalLine(newWidth);
+                    currentColumn = 0;
+                }
+                if (currentColumn + glyph.width > newWidth) {
+                    reflowed.add(currentLine);
+                    currentLine = new TerminalLine(newWidth);
+                    currentColumn = 0;
+                }
+
+                putGlyphOnLine(currentLine, currentColumn, glyph);
+                currentColumn += glyph.width;
+            }
+
+            reflowed.add(currentLine);
+        }
+
+        this.width = newWidth;
+        this.height = newHeight;
+
+        scrollback.clear();
+        screen.clear();
+
+        int splitIndex = Math.max(0, reflowed.size() - newHeight);
+        for (int i = 0; i < splitIndex; i++) {
+            scrollback.add(reflowed.get(i));
+        }
+        trimScrollback();
+
+        for (int i = splitIndex; i < reflowed.size(); i++) {
+            screen.add(reflowed.get(i));
+        }
+        while (screen.size() < newHeight) {
+            screen.add(blankLine());
+        }
+
+        cursorRow = clamp(cursorRow, 0, newHeight - 1);
+        cursorColumn = clamp(cursorColumn, 0, newWidth - 1);
+        normalizeCursor();
+        pendingWrap = false;
+    }
+
+    private void writeGlyphOverwrite(int row, int column, int codePoint, CellAttributes attributes) {
+        int glyphWidth = DisplayWidthUtils.widthOf(codePoint);
+        String glyphText = DisplayWidthUtils.stringOf(codePoint);
+        TerminalLine line = screen.get(row);
+
+        clearWideCharacterAt(row, column);
+        if (glyphWidth == 2 && column + 1 < width) {
+            clearWideCharacterAt(row, column + 1);
+        }
+
+        putGlyphOnLine(line, column, new Glyph(glyphText, glyphWidth, attributes));
+    }
+
+    private void putGlyphOnLine(TerminalLine line, int column, Glyph glyph) {
+        line.setCell(column, glyph.text, glyph.attributes, false);
+        if (glyph.width == 2) {
+            line.setCell(column + 1, "", glyph.attributes, true);
+        }
+    }
+
+    private void insertGlyph(int row, int column, Glyph glyph) {
+        if (row >= height) {
+            scrollUp();
+            row = height - 1;
+        }
+
+        TerminalLine line = screen.get(row);
+        List<Glyph> glyphs = extractMeaningfulGlyphs(line);
+        int insertIndex = glyphIndexAtVisualColumn(glyphs, column);
+        glyphs.add(insertIndex, glyph);
+
+        List<Glyph> overflow = repackLine(line, glyphs);
+        if (!overflow.isEmpty()) {
+            insertOverflow(row + 1, overflow);
+        }
+    }
+
+    private void insertOverflow(int row, List<Glyph> overflow) {
+        if (overflow.isEmpty()) {
+            return;
+        }
+
+        if (row >= height) {
+            scrollUp();
+            row = height - 1;
+        }
+
+        TerminalLine line = screen.get(row);
+        List<Glyph> existing = extractMeaningfulGlyphs(line);
+
+        List<Glyph> merged = new ArrayList<>(overflow.size() + existing.size());
+        merged.addAll(overflow);
+        merged.addAll(existing);
+
+        List<Glyph> nextOverflow = repackLine(line, merged);
+
+        if (!nextOverflow.isEmpty()) {
+            if (nextOverflow.size() == overflow.size() && row == height - 1 && existing.isEmpty()) {
+                return;
+            }
+            insertOverflow(row + 1, nextOverflow);
+        }
+    }
+
+    private List<Glyph> repackLine(TerminalLine line, List<Glyph> glyphs) {
+        line.clear();
+        List<Glyph> overflow = new ArrayList<>();
+        int column = 0;
+
+        for (Glyph glyph : glyphs) {
+            if (glyph.width == 2 && column == width - 1) {
+                overflow.add(glyph);
+                continue;
+            }
+            if (column + glyph.width > width) {
+                overflow.add(glyph);
+                continue;
+            }
+            putGlyphOnLine(line, column, glyph);
+            column += glyph.width;
+        }
+
+        return overflow;
+    }
+
+    private int glyphIndexAtVisualColumn(List<Glyph> glyphs, int visualColumn) {
+        int currentColumn = 0;
+
+        for (int i = 0; i < glyphs.size(); i++) {
+            if (currentColumn >= visualColumn) {
+                return i;
+            }
+            currentColumn += glyphs.get(i).width;
+        }
+
+        return glyphs.size();
+    }
+
+    private List<Glyph> extractMeaningfulGlyphs(TerminalLine line) {
+        List<Glyph> glyphs = new ArrayList<>();
+        int i = 0;
+
+        while (i < line.width()) {
+            Cell cell = line.getCell(i);
+
+            if (cell.isContinuation()) {
+                i++;
+                continue;
+            }
+
+            boolean isWide = i + 1 < line.width() && line.getCell(i + 1).isContinuation();
+            String text = cell.getText();
+
+            if (isWide) {
+                glyphs.add(new Glyph(text, 2, cell.getAttributes()));
+                i += 2;
+                continue;
+            }
+
+            glyphs.add(new Glyph(text, 1, cell.getAttributes()));
+            i++;
+        }
+
+        int end = glyphs.size();
+        while (end > 0 && " ".equals(glyphs.get(end - 1).text) && glyphs.get(end - 1).width == 1) {
+            end--;
+        }
+
+        return new ArrayList<>(glyphs.subList(0, end));
+    }
+
+
+    private void clearWideCharacterAt(int row, int column) {
+        TerminalLine line = screen.get(row);
+        Cell cell = line.getCell(column);
+
+        if (cell.isContinuation()) {
+            if (column > 0) {
+                line.clearCell(column - 1);
+            }
+            line.clearCell(column);
+            return;
+        }
+
+        if (column + 1 < width && line.getCell(column + 1).isContinuation()) {
+            line.clearCell(column);
+            line.clearCell(column + 1);
+            return;
+        }
+
+        line.clearCell(column);
+    }
+
+
+    /**
+     * Represents one renderable glyph and its display width.
+     */
+    private static final class Glyph {
+        private final String text;
+        private final int width;
+        private final CellAttributes attributes;
+
+        /**
+         * Creates a glyph with text, display width and attributes.
+         *
+         * @param text the glyph text
+         * @param width the terminal display width
+         * @param attributes the glyph attributes
+         */
+        private Glyph(String text, int width, CellAttributes attributes) {
+            this.text = text;
+            this.width = width;
+            this.attributes = attributes;
+        }
     }
 }
