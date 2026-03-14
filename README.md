@@ -149,4 +149,3 @@ Some important limitations are:
 
 - **Unicode width heuristics are approximate.** Display width is estimated using Unicode ranges and scripts, which is sufficient for this task but not equivalent to a full terminal-width implementation.
 - **Terminal control semantics are intentionally limited.** The project models buffer storage, editing, wrapping, scrollback, and resizing, but it does not implement escape-sequence parsing, alternate screen behavior, or full ANSI terminal semantics.
-- **The implementation prioritizes clarity over heavy-load optimization.** For the size of this assignment, readability and correctness were prioritized. For large-scale or performance-critical workloads, further optimization of insertion, reflow, and line management would be appropriate.
