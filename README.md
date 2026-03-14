@@ -109,6 +109,25 @@ When the screen is resized:
 
 This strategy preserves as much content as possible while maintaining deterministic behavior.
 
+## Behavioral Decisions
+
+This implementation makes the following explicit behavioral choices:
+
+### Deferred wrapping
+Writing uses deferred wrapping semantics. When a character is written at the last available column, the cursor remains on that line and a wrap is performed only before the next printable character is written. This more closely matches common terminal behavior than wrapping immediately after the last cell is filled.
+
+### Insert semantics
+`insertText` inserts glyphs at the current cursor position by shifting the existing line content to the right. If the line overflows, the excess content is propagated to the following lines. If overflow reaches the bottom of the screen, the screen scrolls upward and the top line is moved into scrollback, subject to the configured scrollback limit.
+
+### Wide-character representation
+Wide characters are represented using two terminal cells. The first cell stores the glyph, and the second cell is marked as a continuation cell. Cursor normalization prevents the cursor from being placed on the continuation half of a wide glyph.
+
+### Resize strategy
+Resizing uses a reflow-based strategy. Existing visible and scrollback content is re-packed according to the new width, and the bottom-most lines remain on screen after resize. Older content is preserved in scrollback as long as the configured scrollback capacity allows it.
+
+### Scrollback trimming policy
+Scrollback is bounded by a fixed maximum size. When the number of scrollback lines exceeds this limit, the oldest lines are discarded first.
+
 ---
 
 ## Running the Tests
@@ -118,4 +137,16 @@ The project uses **Maven** as the build tool and **JUnit 5** for testing.
 To compile the project and run all tests:
 
 ```bash
-    mvn run test
+    mvn test
+```
+---
+
+## Known Limitations
+
+This project focuses on the terminal buffer data structure itself and does not attempt to implement a full terminal emulator.
+
+Some important limitations are:
+
+- **Unicode width heuristics are approximate.** Display width is estimated using Unicode ranges and scripts, which is sufficient for this task but not equivalent to a full terminal-width implementation.
+- **Terminal control semantics are intentionally limited.** The project models buffer storage, editing, wrapping, scrollback, and resizing, but it does not implement escape-sequence parsing, alternate screen behavior, or full ANSI terminal semantics.
+- **The implementation prioritizes clarity over heavy-load optimization.** For the size of this assignment, readability and correctness were prioritized. For large-scale or performance-critical workloads, further optimization of insertion, reflow, and line management would be appropriate.
